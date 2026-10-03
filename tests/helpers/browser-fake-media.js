@@ -16,27 +16,23 @@ export const FAKE_MEDIA_INIT = `
 
   const PRIMARY = 'fake-device-primary';
   const BACKUP = 'fake-device-backup';
+  const SPARE = 'fake-device-spare';
   const DEVICES = [
     { deviceId: PRIMARY, label: 'Virtual Primary Cam', kind: 'videoinput' },
-    { deviceId: BACKUP,  label: 'Virtual Backup Cam',  kind: 'videoinput' }
+    { deviceId: BACKUP,  label: 'Virtual Backup Cam',  kind: 'videoinput' },
+    { deviceId: SPARE,   label: 'Virtual Spare Cam',   kind: 'videoinput' }
   ];
 
-  function makeCanvas(role) {
+  function makeCanvas(role, color) {
     const c = document.createElement('canvas');
     c.width = 320; c.height = 240;
     const ctx = c.getContext('2d');
     let n = 0;
     function draw() {
-      if (role === 'primary') {
-        ctx.fillStyle = '#1b3fae'; ctx.fillRect(0, 0, 320, 240);
-        ctx.fillStyle = '#7fd0ff';
-      } else {
-        ctx.fillStyle = '#0b2b14'; ctx.fillRect(0, 0, 320, 240);
-        ctx.fillStyle = '#54ff9e';
-      }
-      const x = role === 'backup' ? (n * 6) % 320 : 40;
-      ctx.fillRect(x, 90, 40, 60);
+      ctx.fillStyle = color; ctx.fillRect(0, 0, 320, 240);
       ctx.fillStyle = '#ffffff';
+      const x = (n * 6) % 320;
+      ctx.fillRect(x, 90, 40, 60);
       ctx.font = '16px monospace';
       ctx.fillText(role + ' ' + (n++), 10, 20);
     }
@@ -46,8 +42,9 @@ export const FAKE_MEDIA_INIT = `
   }
 
   const sources = {
-    [PRIMARY]: makeCanvas('PRIMARY'),
-    [BACKUP]: makeCanvas('BACKUP')
+    [PRIMARY]: makeCanvas('PRIMARY', '#1b3fae'),
+    [BACKUP]: makeCanvas('BACKUP', '#0b2b14'),
+    [SPARE]: makeCanvas('SPARE', '#5a1b6e')
   };
   /** deviceId -> 当前活动的 MediaStreamTrack 列表 */
   const activeTracks = new Map();
@@ -119,7 +116,7 @@ export const FAKE_MEDIA_INIT = `
   } catch { /* ignore */ }
 
   window.__fakeMedia = {
-    PRIMARY, BACKUP,
+    PRIMARY, BACKUP, SPARE,
     unplug(idOrRole) {
       const id = idOrRole === 'primary' ? PRIMARY
         : idOrRole === 'backup' ? BACKUP : idOrRole;

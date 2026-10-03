@@ -91,6 +91,11 @@ export class Recorder extends EventTarget {
    * @param {boolean} [cfg.audio]   是否同时请求麦克风
    * @param {boolean} [cfg.watchPermission]
    * @param {boolean} [cfg.watchDeviceChanges]
+   * @param {() => number} [cfg.quotaBytes]
+   *        多路并行时注入：返回所有路当前实际持有字节数之和。
+   *        缺省只统计本录制器（单路模式）。
+   * @param {() => void} [cfg.onSegmentSealed]
+   *        多路并行时注入：某段完成封口后的通知钩子。
    */
   constructor(cfg) {
     super();
@@ -99,6 +104,13 @@ export class Recorder extends EventTarget {
     this.urlObj = cfg.urlObj;
     this.primaryId = cfg.devices.primaryId;
     this.backupId = cfg.devices.backupId;
+    /** 持有量超限判断：多路模式按全部仍持有素材的合计计算。 */
+    this._quotaBytes =
+      typeof cfg.quotaBytes === 'function'
+        ? cfg.quotaBytes
+        : () => this.heldBytes;
+    this._onSegmentSealed =
+      typeof cfg.onSegmentSealed === 'function' ? cfg.onSegmentSealed : null;
     this.maxHeldBytes = cfg.maxHeldBytes ?? 512 * 1024 * 1024;
     this.timeslice = cfg.timeslice ?? 1000;
     this.stopTimeoutMs = cfg.stopTimeoutMs ?? 15000;
@@ -469,12 +481,17 @@ export class Recorder extends EventTarget {
   /**
    * 轨道中断（设备拔出 -> ended；系统静音/物理遮挡 -> mute）。
    * 已封口或属于旧片段的事件一律忽略——迟到事件不能影响当前片段。
+   * 单路聚合（backupId 为空，无设备可接管）时缺口也要明确留下并保持打开。
    */
   async _onTrackInterrupt(segment, reason, track) {
     if (!this.running) return;
     if (this.active !== segment || segment.state !== 'recording') return;
     await this._sealCurrent(reason);
-    await this._failover(reason, null, [segment.deviceId]);
+    // 先开缺口：即使没有任何可接管设备（failover 提前返回），中断也有记录。
+    const gap = this._openGapFor(reason);
+    await this._failover(reason, { gap, failedId: segment.deviceId }, [
+      segment.deviceId
+    ]);
   }
 
   // ------------------------------------------------------------------ 封口
@@ -578,7 +595,13 @@ export class Recorder extends EventTarget {
 
     this._sealingCount = Math.max(0, this._sealingCount - 1);
     this._emit('segmentsealed', { segment });
+    try { this._onSegmentSealed?.(segment); } catch { /* 聚合层钩子失败无害 */ }
     this._settleIfDone();
+  }
+
+  /** 尚未落定（正在封口）的段数；多路聚合层据此判断会话能否交付。 */
+  get sealingCount() {
+    return this._sealingCount;
   }
 
   // ---------------------------------------------------------- 数据 / 错误
@@ -595,7 +618,8 @@ export class Recorder extends EventTarget {
     this.heldBytes += data.size;
     this._emit('dataheld', {segment,bytes:data.size});
 
-    if (this.heldBytes > this.maxHeldBytes) {
+    // 多路模式下按【所有路合计】的实际持有量判断配额。
+    if (this._quotaBytes() > this.maxHeldBytes) {
       this.quotaExceeded = true;
       this.enqueue(() => this._onQuotaExceeded(), 'quota');
     }

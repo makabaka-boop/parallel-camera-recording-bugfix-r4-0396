@@ -6,9 +6,9 @@
   "type": "module",
   "scripts": {
     "start": "node tools/server.mjs",
-    "test": "node --test tests/recorder-core.test.js",
+    "test": "node --test tests/recorder-core.test.js tests/parallel-recorder.test.js",
     "test:e2e": "node --test tests/e2e.spec.js",
-    "test:all": "node --test tests/recorder-core.test.js tests/e2e.spec.js"
+    "test:all": "node --test tests/recorder-core.test.js tests/parallel-recorder.test.js tests/e2e.spec.js"
   },
   "license": "MIT",
   "devDependencies": {

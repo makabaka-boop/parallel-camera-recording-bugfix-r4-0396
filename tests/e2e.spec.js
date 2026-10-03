@@ -119,16 +119,19 @@ async function getState(page) {
     const r = window.__recorder;
     return {
       running: r.running,
-      activeDeviceId: r.activeDeviceId,
-      activeRole: r.activeRole,
       heldBytes: r.heldBytes,
+      activeDeviceId: r.activeDeviceId ?? null,
+      activeRole: r.activeRole ?? null,
+      isParallel: typeof r.lanes === 'object',
       segments: r.segments.map((s) => ({
         index: s.index, deviceId: s.deviceId, role: s.role,
         state: s.state, reason: s.reason, bytes: s.bytes,
+        released: !!s.released,
         hasUrl: !!s.url, hasBlob: !!s.blob
       })),
       gaps: r.gaps.map((g) => ({
         afterSegment: g.afterSegment,
+        role: g.role || null,
         from: g.from, to: g.to,
         open: g.to == null, reason: g.reason,
         failoverFailed: !!g.failoverFailed
@@ -383,5 +386,234 @@ test('清空：所有 ObjectURL 均被 revokeObjectURL 撤销', async () => {
   for (const u of revoked.urls) {
     assert.ok(revoked.calls.includes(u), `${u} 应被撤销`);
   }
+  await page.close();
+});
+
+// ---------------------------------------------------------------------------
+// 双路同时留证（ParallelRecorder）
+// ---------------------------------------------------------------------------
+
+/** 勾选“双路同时留证”并以指定主备开始，返回时两路均在录制。 */
+async function configureParallelAndStart(page, primaryId, backupId) {
+  await page.evaluate(([p, b]) => {
+    document.getElementById('parallelToggle').checked = true;
+    document.getElementById('primarySelect').value = p;
+    document.getElementById('primarySelect').dispatchEvent(new Event('change'));
+    document.getElementById('backupSelect').value = b;
+    document.getElementById('backupSelect').dispatchEvent(new Event('change'));
+  }, [primaryId, backupId]);
+  await page.waitForTimeout(300);
+  await page.click('#startBtn');
+  await page.waitForFunction(
+    () => window.__recorder && window.__recorder.segments.length >= 2
+  );
+  await page.waitForTimeout(500);
+}
+
+test('双路：单路失联只终结该路，另一路继续；两路都封口后才能交付', async () => {
+  const { page } = await newPage();
+  const { PRIMARY, BACKUP } = await page.evaluate(() => ({
+    PRIMARY: window.__fakeMedia.PRIMARY,
+    BACKUP: window.__fakeMedia.BACKUP
+  }));
+  await configureParallelAndStart(page, PRIMARY, BACKUP);
+
+  // 拔出主路
+  await page.evaluate(() => window.__fakeMedia.unplug('primary'));
+  await waitFor(
+    async () =>
+      page.evaluate(
+        () => !window.__recorder.lanes.get('primary').running
+          && window.__recorder.lanes.get('backup').running
+      ),
+    page
+  );
+
+  let st = await getState(page);
+  assert.equal(st.running, true, '备路继续，会话仍运行');
+  const laneStates = await page.evaluate(() => ({
+    primaryRunning: window.__recorder.lanes.get('primary').running,
+    backupRunning: window.__recorder.lanes.get('backup').running
+  }));
+  assert.deepEqual(laneStates, { primaryRunning: false, backupRunning: true });
+
+  // 主路有打开的缺口，缺口带路归属
+  st = await getState(page);
+  const primaryGap = st.gaps.find((g) => g.role === 'primary');
+  assert.ok(primaryGap, '主路断开留下缺口');
+  assert.equal(primaryGap.open, true, '该路无设备可接管，缺口保持打开');
+  assert.equal(primaryGap.failoverFailed, true);
+
+  // 仍在录制中：交付未就绪
+  assert.equal(st.manifest.ready, false);
+
+  // 备路再录一会儿后整体停止
+  await page.waitForTimeout(800);
+  await page.click('#stopBtn');
+  await page.waitForFunction(
+    () => window.__recorder.segments.every((s) => s.state === 'sealed'),
+    { timeout: 20000 }
+  );
+
+  st = await getState(page);
+  assert.equal(st.running, false);
+  assert.equal(st.segments.length, 2);
+  assert.deepEqual(
+    st.segments.map((s) => [s.deviceId, s.role]),
+    [[PRIMARY, 'primary'], [BACKUP, 'backup']],
+    '每块素材保留真实设备与路归属'
+  );
+  assert.equal(st.manifest.ready, true, '两路都封口后可交付');
+  // 重叠拍摄时间按并集计算，不是两段时长简单相加
+  const sums = st.manifest.segments.reduce((n, s) => n + s.durationMs, 0);
+  assert.ok(
+    st.manifest.coverageMs < sums,
+    `覆盖(${st.manifest.coverageMs}) 应小于两段之和(${sums})`
+  );
+
+  await page.close();
+});
+
+test('双路：替换主路设备后，新素材记在主路名下且设备真实，备路不受影响', async () => {
+  const { page } = await newPage();
+  const IDS = await page.evaluate(() => ({
+    PRIMARY: window.__fakeMedia.PRIMARY,
+    BACKUP: window.__fakeMedia.BACKUP,
+    SPARE: window.__fakeMedia.SPARE
+  }));
+  await configureParallelAndStart(page, IDS.PRIMARY, IDS.BACKUP);
+  await page.waitForTimeout(700);
+
+  // 主路设备失效：拔出主路（该路结束），随后在选择器里选替换机 SPARE
+  // 并点击“替换所选路设备”，主路用新设备重开。
+  await page.evaluate(() => window.__fakeMedia.unplug('primary'));
+  await page.waitForFunction(
+    () => !window.__recorder.lanes.get('primary').running
+      && window.__recorder.lanes.get('backup').running,
+    { timeout: 10000 }
+  );
+
+  await page.evaluate((spare) => {
+    document.getElementById('replaceRole').value = 'primary';
+    document.getElementById('primarySelect').value = spare;
+  }, IDS.SPARE);
+  await page.click('#switchBtn');
+  await page.waitForFunction(
+    () => window.__recorder.lanes.get('primary').activeDeviceId === 'fake-device-spare'
+      && window.__recorder.lanes.get('primary').running,
+    { timeout: 10000 }
+  );
+
+  // 备路全程未受影响
+  assert.equal(
+    await page.evaluate(
+      () => window.__recorder.lanes.get('backup').activeDeviceId
+    ),
+    IDS.BACKUP
+  );
+
+  await page.waitForTimeout(700);
+  await page.click('#stopBtn');
+  await page.waitForFunction(
+    () => window.__recorder.segments.every((s) => s.state === 'sealed'),
+    { timeout: 20000 }
+  );
+
+  const st = await getState(page);
+  // 三段：旧主(PRIMARY, primary)、备(BACKUP, backup)、新主(SPARE, primary)
+  assert.equal(st.segments.length, 3);
+  assert.deepEqual(
+    st.segments.map((s) => [s.deviceId, s.role]),
+    [
+      [IDS.PRIMARY, 'primary'],
+      [IDS.BACKUP, 'backup'],
+      [IDS.SPARE, 'primary']
+    ],
+    '替换机素材归主路，不能记到仍在工作的备路名下'
+  );
+  assert.deepEqual(
+    st.manifest.segments.map((s) => s.file),
+    ['segment-000.webm', 'segment-001.webm', 'segment-002.webm']
+  );
+  for (const s of st.segments) assert.ok(s.bytes > 0, '每段都有真实媒体');
+  // 旧主路故障缺口保留，替换后的新段是该路的后续素材
+  assert.ok(
+    st.gaps.some((g) => g.role === 'primary' && g.reason === 'disconnect')
+  );
+
+  await page.close();
+});
+
+test('双路：释放一路素材后另一路的持有字节与下载 URL 仍然有效', async () => {
+  const { page } = await newPage();
+  const { PRIMARY, BACKUP } = await page.evaluate(() => ({
+    PRIMARY: window.__fakeMedia.PRIMARY,
+    BACKUP: window.__fakeMedia.BACKUP
+  }));
+  await configureParallelAndStart(page, PRIMARY, BACKUP);
+  await page.waitForTimeout(1000);
+  await page.click('#stopBtn');
+  await page.waitForFunction(
+    () => window.__recorder.segments.every((s) => s.state === 'sealed'),
+    { timeout: 20000 }
+  );
+
+  const before = await page.evaluate(() => {
+    const r = window.__recorder;
+    return {
+      held: r.heldBytes,
+      segBytes: r.segments.map((s) => s.bytes),
+      urls: r.segments.map((s) => s.url)
+    };
+  });
+  assert.ok(before.held >= before.segBytes[0] + before.segBytes[1] - 50,
+    '合计持有量约为两路之和');
+
+  // 释放主路段（全局索引 0）
+  await page.evaluate(() => window.__recorder.releaseSegment(0));
+  await page.waitForTimeout(200);
+
+  const after = await getState(page);
+  assert.equal(after.segments[0].released, true);
+  assert.equal(after.segments[0].hasUrl, false, '主路 URL 已撤销');
+  assert.equal(after.segments[1].hasUrl, true, '备路 URL 保持有效');
+  assert.equal(after.heldBytes, after.segments[1].bytes,
+    '持有量只剩备路那一段');
+  assert.equal(after.manifest.segments[0].file, null);
+  assert.equal(after.manifest.segments[1].file, 'segment-001.webm');
+  assert.equal(after.manifest.heldBytes, after.segments[1].bytes);
+
+  await page.close();
+});
+
+test('双路：两路先后失效，会话在第二路也无法继续时才结束', async () => {
+  const { page } = await newPage();
+  const { PRIMARY, BACKUP } = await page.evaluate(() => ({
+    PRIMARY: window.__fakeMedia.PRIMARY,
+    BACKUP: window.__fakeMedia.BACKUP
+  }));
+  await configureParallelAndStart(page, PRIMARY, BACKUP);
+  await page.waitForTimeout(500);
+
+  await page.evaluate(() => window.__fakeMedia.unplug('primary'));
+  await page.waitForFunction(
+    () => !window.__recorder.lanes.get('primary').running,
+    { timeout: 10000 }
+  );
+  assert.equal(
+    await page.evaluate(() => window.__recorder.running),
+    true,
+    '单路失效会话仍运行'
+  );
+
+  await page.evaluate(() => window.__fakeMedia.unplug('backup'));
+  await waitFor(async () => (await getState(page)).running === false, page);
+
+  const st = await getState(page);
+  assert.equal(st.segments.length, 2);
+  const roles = st.gaps.map((g) => g.role).sort();
+  assert.deepEqual(roles, ['backup', 'primary'], '两路各留自己的缺口');
+  assert.ok(st.gaps.every((g) => g.open));
+
   await page.close();
 });

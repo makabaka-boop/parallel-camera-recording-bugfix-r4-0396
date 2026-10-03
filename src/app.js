@@ -203,9 +203,17 @@ function wireRecorderEvents(rec) {
     log(`⚠ 片段 #${detail.segment.index} onstop 超时，已强制封口`, 'ev-warn');
   });
   rec.addEventListener('laneended',()=>{setStatus(rec.running?'另一摄像头继续录制':'两路均已结束');render();});
+  rec.addEventListener('laneended', ({ detail }) => {
+    const lane = detail?.role === 'primary' ? '主' : '备';
+    log(`◆ ${lane}路已结束，另一路继续留证`, 'ev-warn');
+    setStatus(rec.running ? `${lane}路已结束，另一路继续录制` : '两路均已结束');
+    render();
+  });
   rec.addEventListener('failoverfailed', ({ detail }) => {
     log(`✖ ${detail.reason} 后无可用设备，录制在缺口处终止`, 'ev-err');
-    setStatus('已停止（无可用设备，存在未闭合缺口）', true);
+    if (!rec.running) {
+      setStatus('已停止（无可用设备，存在未闭合缺口）', true);
+    }
   });
   rec.addEventListener('acquireerror', ({ detail }) => {
     log(`✖ 无法打开设备 ${detail.deviceId}：${detail.error}（触发于 ${detail.trigger}）`, 'ev-err');
@@ -224,8 +232,11 @@ function wireRecorderEvents(rec) {
     log('检测到设备热插拔，已刷新设备列表', 'ev-warn');
   });
   rec.addEventListener('settled', () => {
-    log('所有片段已落定（无待写数据）', 'ev-ok');
-    updateButtons(false);
+    // 单路模式：录制器落定即可；双路模式只在两路都封口时才会收到该事件。
+    if (!rec.running) {
+      log('所有片段已落定（无待写数据）', 'ev-ok');
+      updateButtons(false);
+    }
   });
 }
 
@@ -267,14 +278,25 @@ async function onStart() {
 }
 
 async function onSwitch() {
-  if (!recorder?.running) return;
-  const currentlyPrimary = recorder.activeRole === 'primary';
   els.switchBtn.disabled = true;
   try {
-    if(recorder instanceof ParallelRecorder) {
-      const role=$('replaceRole').value;
-      await recorder.replace(role,role==='primary'?els.primarySelect.value:els.backupSelect.value);
-    } else await recorder.switchTo(currentlyPrimary ? 'backup' : 'primary');
+    if (recorder instanceof ParallelRecorder) {
+      const role = $('replaceRole').value;
+      const id = role === 'primary'
+        ? els.primarySelect.value
+        : els.backupSelect.value;
+      if (!id) {
+        log('请先为该路选择替换设备', 'ev-err');
+        return;
+      }
+      // 双路模式：即使被替换的那一路已经故障停止，只要会话还在（另一路在录）
+      // 也允许用新设备重开该路。
+      await recorder.replace(role, id);
+    } else {
+      if (!recorder?.running) return;
+      const currentlyPrimary = recorder.activeRole === 'primary';
+      await recorder.switchTo(currentlyPrimary ? 'backup' : 'primary');
+    }
     render();
   } catch (err) {
     log(`切换失败: ${err.message}`, 'ev-err');
@@ -395,22 +417,32 @@ function render() {
       switch: '手动切换',
       'failover-failed': '接管失败（无可用备机）'
     }[g.reason] || g.reason;
+    // 双路模式缺口按路标注归属；单路模式无 role 字段。
+    const lanePrefix = g.role
+      ? `（${g.role === 'primary' ? '主' : '备'}路）`
+      : '';
     li.textContent =
-      `片段 #${g.afterSegment} 之后：${fmtTime(g.from)} → ` +
+      `片段 #${g.afterSegment} 之后${lanePrefix}：${fmtTime(g.from)} → ` +
       `${open ? '仍未恢复' : fmtTime(g.to)}` +
       `（${open ? '缺口未闭合' : fmtDuration(g.to - g.from)}，原因：${reasonText}）`;
     els.gapList.appendChild(li);
   }
 
   const hasSealed = rec.segments.some((s) => s.state === 'sealed' && !s.released);
-  els.downloadAllBtn.disabled = !hasSealed;
+  // 两路封口后才能完成交付：只要还有录制中/封口中的段，不允许打包下载。
+  const anyBusy = rec.segments.some(
+    (s) => s.state === 'recording' || s.state === 'sealing'
+  );
+  els.downloadAllBtn.disabled = !hasSealed || anyBusy;
   els.downloadManifestBtn.disabled = !rec.segments.length;
   els.clearAllBtn.disabled = rec.running || !rec.segments.length;
   updateButtons(rec.running);
   updateHeld(rec);
 
-  // 切换按钮文案反映下一台
-  if (rec.running) {
+  // 切换/替换按钮文案：双路模式是“替换所选路设备”，单路模式在主备间切换。
+  if (rec instanceof ParallelRecorder) {
+    els.switchBtn.textContent = '替换所选路设备';
+  } else if (rec.running) {
     els.switchBtn.textContent =
       rec.activeRole === 'primary' ? '手动切换到备机' : '手动切回主机';
   } else {
