@@ -91,6 +91,8 @@ export class Recorder extends EventTarget {
    * @param {boolean} [cfg.audio]   是否同时请求麦克风
    * @param {boolean} [cfg.watchPermission]
    * @param {boolean} [cfg.watchDeviceChanges]
+   * @param {'primary'|'backup'} [cfg.role] 双路同时留证时强制使用的车道角色
+   *        （该录制器只代表一路，段与事件一律带上此角色）
    */
   constructor(cfg) {
     super();
@@ -99,6 +101,8 @@ export class Recorder extends EventTarget {
     this.urlObj = cfg.urlObj;
     this.primaryId = cfg.devices.primaryId;
     this.backupId = cfg.devices.backupId;
+    /** 双路同时留证：本录制器被固定为某条车道（primary/backup）。 */
+    this.fixedRole = cfg.role || null;
     this.maxHeldBytes = cfg.maxHeldBytes ?? 512 * 1024 * 1024;
     this.timeslice = cfg.timeslice ?? 1000;
     this.stopTimeoutMs = cfg.stopTimeoutMs ?? 15000;
@@ -255,19 +259,19 @@ export class Recorder extends EventTarget {
    * 停止意图在【调用瞬间】同步生效（纪元 +1），保证排在队列后面的停止任务
    * 执行前，任何在途 getUserMedia 回来都会发现自己已作废；封口动作仍经队列串行。
    */
-  stop() {
+  stop(reason = 'user-stop') {
     this._stopRequested = true;
     if (this.running) this._epoch++;
-    return this.enqueue(() => this._stop(), 'stop');
+    return this.enqueue(() => this._stop(reason), 'stop');
   }
 
-  async _stop() {
+  async _stop(reason = 'user-stop') {
     if (!this.running) return;
     this.running = false;
     this._epoch++;
     // 停止任务入队前可能恰好有接管任务完成：active 非空也要封口，
     // 绝不让“停止后新建的片段”继续录。
-    await this._sealCurrent('user-stop');
+    await this._sealCurrent(reason);
   }
 
   /** 停止后等待全部异步封口（onstop / 超时强制封口）落定。 */
@@ -363,6 +367,7 @@ export class Recorder extends EventTarget {
     }
 
     const role =
+      this.fixedRole ||
       roleHint || (deviceId === this.primaryId ? 'primary' : 'backup');
     const segment = {
       index: this.segments.length,
@@ -657,8 +662,10 @@ export class Recorder extends EventTarget {
     })();
     if (!target) {
       this.running = false;
-      if (closure?.gap && closure.gap.to == null) {
-        closure.gap.failoverFailed = true;
+      // 即使没有任何可接管设备，中断本身造成的缺口也必须落账并保持打开。
+      const openGap = closure?.gap || this._openGapFor(reason);
+      if (openGap.to == null) {
+        openGap.failoverFailed = true;
       }
       this._lastError = new Error(`no device available after ${reason}`);
       this._emit('failoverfailed', { reason, tried: [...tried] });

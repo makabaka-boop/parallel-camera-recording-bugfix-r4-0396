@@ -202,7 +202,13 @@ function wireRecorderEvents(rec) {
   rec.addEventListener('forcedseal', ({ detail }) => {
     log(`⚠ 片段 #${detail.segment.index} onstop 超时，已强制封口`, 'ev-warn');
   });
-  rec.addEventListener('laneended',()=>{setStatus(rec.running?'另一摄像头继续录制':'两路均已结束');render();});
+  rec.addEventListener('laneended', ({ detail }) => {
+    const lane = detail?.role === 'primary' ? '主路'
+      : detail?.role === 'backup' ? '备路' : '一路';
+    log(`${lane}无法继续（${detail?.reason || '未知原因'}），其片段已封口；另一路继续录制`, 'ev-warn');
+    setStatus(rec.running ? '另一摄像头继续录制' : '两路均已结束');
+    render();
+  });
   rec.addEventListener('failoverfailed', ({ detail }) => {
     log(`✖ ${detail.reason} 后无可用设备，录制在缺口处终止`, 'ev-err');
     setStatus('已停止（无可用设备，存在未闭合缺口）', true);
@@ -326,6 +332,7 @@ const REASON_TEXT = {
   'recorder-error': '录制器错误',
   'quota-limit': '达到持有上限',
   'stop-timeout': 'onstop 超时',
+  'lane-replaced': '替换设备（该路封口）',
   dispose: '页面释放'
 };
 
@@ -403,7 +410,11 @@ function render() {
   }
 
   const hasSealed = rec.segments.some((s) => s.state === 'sealed' && !s.released);
-  els.downloadAllBtn.disabled = !hasSealed;
+  // 双路同时留证：两路片段全部封口后才能交付（可逐段下载，但“全部+清单”
+  // 必须等会话落定）；单机位模式只要有已封口段即可。
+  const canDeliver =
+    rec instanceof ParallelRecorder ? rec.deliverable : hasSealed;
+  els.downloadAllBtn.disabled = !canDeliver;
   els.downloadManifestBtn.disabled = !rec.segments.length;
   els.clearAllBtn.disabled = rec.running || !rec.segments.length;
   updateButtons(rec.running);
@@ -411,8 +422,12 @@ function render() {
 
   // 切换按钮文案反映下一台
   if (rec.running) {
-    els.switchBtn.textContent =
-      rec.activeRole === 'primary' ? '手动切换到备机' : '手动切回主机';
+    if (rec instanceof ParallelRecorder) {
+      els.switchBtn.textContent = '替换所选一路并重开';
+    } else {
+      els.switchBtn.textContent =
+        rec.activeRole === 'primary' ? '手动切换到备机' : '手动切回主机';
+    }
   } else {
     els.switchBtn.textContent = '手动切换到备机';
   }
