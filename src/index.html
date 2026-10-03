@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>双摄像头分段录制（本机存储，不上传）</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>双摄像头分段录制</h1>
+    <p class="privacy">
+      所有视频仅保存在本机内存（Blob），通过浏览器下载导出；
+      <strong>本页面不向任何服务器上传媒体数据</strong>。
+    </p>
+  </header>
+
+  <main>
+    <section class="device-picker card">
+      <h2>1. 选择主 / 备摄像头</h2>
+      <div class="picker-row">
+        <label>
+          主设备
+          <select id="primarySelect"></select>
+        </label>
+        <label>
+          备设备
+          <select id="backupSelect"></select>
+        </label>
+        <label class="mic-toggle">
+          <input type="checkbox" id="audioToggle" />
+          同时录制麦克风
+        </label>
+        <button id="refreshDevices" type="button">刷新设备</button>
+      </div>
+      <p id="permHint" class="hint" hidden></p>
+    </section>
+
+    <section class="preview card">
+      <h2>2. 预览</h2>
+      <div class="video-grid">
+        <figure>
+          <video id="primaryVideo" muted playsinline autoplay></video>
+          <figcaption>
+            <span class="dot" id="primaryDot"></span>
+            主：<span id="primaryName">未选择</span>
+          </figcaption>
+        </figure>
+        <figure>
+          <video id="backupVideo" muted playsinline autoplay></video>
+          <figcaption>
+            <span class="dot" id="backupDot"></span>
+            备：<span id="backupName">未选择</span>
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="controls card">
+      <h2>3. 录制控制</h2>
+      <div class="btn-row">
+        <label><input id="parallelToggle" type="checkbox">双路同时留证</label><select id="replaceRole"><option value="primary">替换主路</option><option value="backup">替换备路</option></select>
+        <button id="startBtn" type="button" class="primary">开始录制</button>
+        <button id="switchBtn" type="button" disabled>手动切换到备机</button>
+        <button id="stopBtn" type="button" class="danger" disabled>停止</button>
+      </div>
+      <div class="status-row">
+        <span id="recordDot" class="record-dot"></span>
+        <span id="statusText">未录制</span>
+        <span class="spacer"></span>
+        <span id="heldInfo" class="mono">持有媒体 0 B / 配额 512 MB</span>
+      </div>
+      <div id="eventLog" class="event-log" aria-live="polite"></div>
+    </section>
+
+    <section class="segments card">
+      <h2>4. 片段与时间缺口</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>#</th><th>设备</th><th>角色</th><th>开始</th><th>结束</th>
+            <th>时长</th><th>大小</th><th>结束原因</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="segmentsBody">
+          <tr class="empty"><td colspan="9">尚无片段</td></tr>
+        </tbody>
+      </table>
+      <h3>时间缺口（这些时段没有任何录制内容）</h3>
+      <ul id="gapList" class="gap-list"><li class="empty">无缺口</li></ul>
+      <div class="btn-row">
+        <button id="downloadAllBtn" type="button" disabled>下载全部片段 + 清单</button>
+        <button id="downloadManifestBtn" type="button" disabled>仅导出时间清单 (JSON)</button>
+        <button id="clearAllBtn" type="button" disabled>清空并撤销本机 URL</button>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

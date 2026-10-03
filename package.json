@@ -1,0 +1,17 @@
+{
+  "name": "dual-camera-segmented-recorder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "主/备双摄像头分段录制：设备断开、轨道静音、权限失效时明确切段并记录时间缺口，媒体仅保存在本机。",
+  "type": "module",
+  "scripts": {
+    "start": "node tools/server.mjs",
+    "test": "node --test tests/recorder-core.test.js",
+    "test:e2e": "node --test tests/e2e.spec.js",
+    "test:all": "node --test tests/recorder-core.test.js tests/e2e.spec.js"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
+}
